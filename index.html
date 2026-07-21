@@ -27,7 +27,7 @@
   </style>
 </head>
 <body>
-  <!-- Overlay Loading Saat Pertama Render (Pencegahan Crash Canvas) -->
+  <!-- Overlay Loading Saat Pertama Render -->
   <div id="loadingOverlay" style="position:fixed;inset:0;background:#fff;z-index:9999;display:flex;align-items:center;justify-content:center;flex-direction:column;font-family:sans-serif;">
     <div class="spinner" style="border-top-color:#2563eb;width:50px;height:50px;border-width:6px;margin-bottom:20px;"></div>
     <h2>Menghubungkan ke Database...</h2>
@@ -186,7 +186,6 @@
 
   <!-- SUPABASE INTEGRATION SCRIPT -->
   <script>
-    // MASUKKAN KREDENSIAL SUPABASE ANDA DI SINI
     const SUPABASE_URL = 'https://tzihldqxwmsvaxufuzux.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR6aWhsZHF4d21zdmF4dWZ1enV4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1OTQzNTEsImV4cCI6MjEwMDE3MDM1MX0.cIZJTOPoeAWa4a02R695oQxnam5NnIr3b8xosS2rlmc';
     
@@ -218,7 +217,6 @@
     });
 
     function renderMockData() {
-      // Dummy data agar UI Canvas tidak crash jika API key belum ada
       state.materials = [{MATERIAL_ID:'M1', PAT_NUMBER:'1400', MATERIAL_DESCRIPTION:'Mock Material', VENDOR:'EON', SATUAN:'LITER', MIN_STOCK:10, CURRENT_STOCK:50}];
       state.vendors = [{VENDOR_NAME:'EON'}, {VENDOR_NAME:'UT'}];
       state.slocs = [{NAMA_SLOC:'WH05'}, {NAMA_SLOC:'LS01'}];
@@ -226,7 +224,6 @@
       renderOptions();
     }
     
-    // UUID Generator (Helper for Client Side ID)
     function generateUUID() {
         var d = new Date().getTime();
         if (typeof performance !== 'undefined' && typeof performance.now === 'function'){
@@ -240,13 +237,11 @@
     }
 
     // ==============================================================
-    // SERVER-LESS ROUTER (Pengganti google.script.run)
+    // SERVER-LESS ROUTER (SUPABASE DB LOGIC)
     // ==============================================================
     
-    // Fungsi ini menangkap panggilan UI (callServer) dan mengalihkannya ke Supabase
     async function supabaseRouter(fn, args, success, failure) {
       if (isMockMode) {
-        // Jika mode mock, kembalikan fake response instan (agar interaktif)
         setTimeout(() => {
           if (fn === 'apiLogin') return success({message: 'Login Mock', user: {username:'admin', role:'ADMIN'}});
           if (fn === 'apiGetInitialData') return success({ materials:state.materials, vendors:state.vendors, slocs:state.slocs, settings:state.settings });
@@ -266,17 +261,31 @@
             
           case 'apiLogin':
             const [username, password] = args;
+            const cleanUser = (username || '').trim().toLowerCase();
+            const cleanPass = (password || '').trim();
+
             const { data: users, error: loginErr } = await supabaseClient
               .from('users')
               .select('*')
-              .eq('username', username)
-              .eq('password', password)
+              .eq('username', cleanUser)
+              .eq('password', cleanPass)
               .eq('status', 'Active');
             
-            if (loginErr) throw loginErr;
+            if (loginErr) {
+              if (loginErr.code === '42P01') {
+                 throw new Error("Database belum siap! Anda WAJIB menjalankan kode dari schema.sql di tab SQL Editor Supabase terlebih dahulu.");
+              }
+              throw new Error("Gagal membaca database: " + loginErr.message);
+            }
+            
             if (users && users.length > 0) {
               res = { success: true, user: users[0], message: 'Login berhasil' };
             } else {
+              // Cek apakah tabel kosong atau terblokir RLS
+              const { data: checkData } = await supabaseClient.from('users').select('username').limit(1);
+              if (!checkData || checkData.length === 0) {
+                  throw new Error("Tabel 'users' di Supabase KOSONG atau TERKUNCI (RLS). Buka Table Editor Supabase, pastikan data admin ada dan matikan RLS.");
+              }
               throw new Error("Username atau password salah.");
             }
             break;
@@ -316,7 +325,6 @@
             const { data: histData, error: histErr } = await query;
             if (histErr) throw histErr;
             
-            // Filter tambahan via memory untuk pencarian keyword/material (mirip kode asli)
             let finalHist = (histData || []).filter(r => {
                 if (filters.material && filters.material !== 'Semua' && r.pat_number !== filters.material && r.material_id !== filters.material) return false;
                 if (filters.noLambung && (r.no_lambung||'').toLowerCase().indexOf(filters.noLambung.toLowerCase()) === -1) return false;
@@ -324,7 +332,6 @@
                     const hay = `${r.do_number} ${r.tujuan} ${r.sumber} ${r.fillup_no} ${r.pat_number} ${r.material_description} ${r.no_lambung}`.toLowerCase();
                     if (hay.indexOf(filters.keyword.toLowerCase()) === -1) return false;
                 }
-                // Mapping snake_case ke UPPER_CASE untuk UI compatibility
                 Object.keys(r).forEach(k => { r[k.toUpperCase()] = r[k]; });
                 return true;
             });
@@ -337,7 +344,6 @@
             const isOut = fn === 'apiSubmitOut';
             let photoUrl = '';
             
-            // 1. Upload Photo jika ada
             if (payload.photoBase64) {
                const b64Data = payload.photoBase64.split(',')[1];
                const byteCharacters = atob(b64Data);
@@ -353,13 +359,11 @@
                }
             }
             
-            // 2. Loop & Update Stock + Insert Transaction
             let saved = 0;
             for (let i=0; i<payload.lines.length; i++) {
                 const line = payload.lines[i];
                 if (!line.materialId || line.qty <= 0) continue;
                 
-                // Ambil stok terbaru
                 const { data: matData } = await supabaseClient.from('materials').select('*').eq('material_id', line.materialId).single();
                 if(!matData) continue;
                 
@@ -368,10 +372,8 @@
                 
                 if (isOut && line.qty > before) throw new Error(`Stok tidak cukup untuk ${matData.pat_number}`);
                 
-                // Update Material
                 await supabaseClient.from('materials').update({ current_stock: after, updated_at: new Date().toISOString() }).eq('material_id', line.materialId);
                 
-                // Insert Transaction
                 await supabaseClient.from('transactions').insert({
                     trx_id: `${isOut?'OUT':'IN'}-${new Date().getTime()}-${Math.floor(Math.random()*1000)}`,
                     trx_date: payload.date,
@@ -398,13 +400,11 @@
                 saved++;
             }
             
-            // Refresh Material Data untuk dikembalikan
             const { data: refMat } = await supabaseClient.from('materials').select('*');
             res = { success: true, message: `Data berhasil disimpan: ${saved} baris.`, saved: saved, photoUrl: photoUrl, data: { materials: refMat, materialsAll: refMat } };
             break;
             
           case 'apiCreatePdf':
-            // PEMBUATAN PDF VIA CLIENT SIDE MENGGUNAKAN HTML2PDF
             const docType = args[0];
             const pLoad = args[1];
             const title = docType === 'OUT' ? 'MATERIAL REQUEST' : 'MATERIAL RECEIVING';
@@ -432,28 +432,137 @@
                 </div>
             `;
             
-            // Konversi ke PDF
-            const pdfBlob = await html2pdf().set({ margin: 1, filename: `${title.replace(/ /g, '_')}.pdf`, image: { type: 'jpeg', quality: 0.98 }, html2canvas: { scale: 2 }, jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' } }).from(htmlString).outputPdf('blob');
-            
-            // Upload ke Supabase
             const pdfName = `${title.replace(/ /g, '_')}_${new Date().getTime()}.pdf`;
-            const { data: pdfUpload, error: pdfErr } = await supabaseClient.storage.from('evidence').upload(pdfName, pdfBlob);
+            const opt = { margin: 0.5, filename: pdfName, image: { type: 'jpeg', quality: 0.98 }, html2canvas: { scale: 2 }, jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' } };
             
-            let finalPdfUrl = '';
-            if(!pdfErr && pdfUpload) {
-                finalPdfUrl = supabaseClient.storage.from('evidence').getPublicUrl(pdfName).data.publicUrl;
+            // 1. Langsung Trigger Download Paksa ke Browser Pengguna (Bypass Pop-up Blocker)
+            html2pdf().set(opt).from(htmlString).save();
+            
+            // 2. Simpan juga ke Storage Supabase di Background
+            try {
+                const pdfBlob = await html2pdf().set(opt).from(htmlString).outputPdf('blob');
+                await supabaseClient.storage.from('evidence').upload(pdfName, pdfBlob);
+            } catch(e) {
+                console.warn("Upload PDF ke Supabase Storage dilewati (Cek RLS/Bucket):", e);
             }
             
-            res = { success: true, message: 'PDF berhasil dibuat dan disimpan.', url: finalPdfUrl };
+            res = { success: true, message: 'PDF berhasil dibuat dan diunduh langsung.' };
             break;
             
-          // UNTUK FUNGSI DASHBOARD & LAINNYA, KITA KEMBALIKAN DUMMY SEMENTARA ATAU AMBIL SELURUH DATA LALU PROSES DI UI
-          // Karena logika computeDashboard aslinya di backend, kita manipulasi state di client saja
           case 'apiGetDashboard':
+            const dArgs = args[0] || {};
+            let { data: mData } = await supabaseClient.from('materials').select('*').neq('status', 'Inactive');
+            if(dArgs.vendor && dArgs.vendor !== 'Semua') mData = mData.filter(m => m.vendor === dArgs.vendor);
+            if(dArgs.material && dArgs.material !== 'Semua') mData = mData.filter(m => m.pat_number === dArgs.material || m.material_id === dArgs.material);
+            
+            let tQuery = supabaseClient.from('transactions').select('*');
+            if(dArgs.startDate) tQuery = tQuery.gte('trx_date', dArgs.startDate);
+            if(dArgs.endDate) tQuery = tQuery.lte('trx_date', dArgs.endDate);
+            if(dArgs.shift && dArgs.shift !== 'Semua') tQuery = tQuery.eq('shift', dArgs.shift);
+            if(dArgs.vendor && dArgs.vendor !== 'Semua') tQuery = tQuery.eq('vendor', dArgs.vendor);
+            const { data: tData } = await tQuery;
+            
+            let tIn = 0, tOut = 0, vMap = {};
+            (tData || []).forEach(t => {
+                if(dArgs.material && dArgs.material !== 'Semua' && t.pat_number !== dArgs.material && t.material_id !== dArgs.material) return;
+                let qty = Number(t.qty || 0);
+                if(t.type === 'IN') tIn += qty;
+                if(t.type === 'OUT') tOut += qty;
+                let v = t.vendor || 'UNKNOWN';
+                if(!vMap[v]) vMap[v] = { vendor: v, totalIn: 0, totalOut: 0, currentStock: 0, jumlahMaterial: 0, materialMinimum: 0, materialKurang: 0 };
+                if(t.type === 'IN') vMap[v].totalIn += qty;
+                if(t.type === 'OUT') vMap[v].totalOut += qty;
+            });
+            
+            let cStock = 0, mTotal = 0, kurang = 0, stockRows = [], lowRows = [];
+            (mData || []).forEach(m => {
+                let cur = Number(m.current_stock || 0);
+                let min = Number(m.min_stock || 0);
+                cStock += cur; mTotal += min;
+                let v = m.vendor || 'UNKNOWN';
+                if(!vMap[v]) vMap[v] = { vendor: v, totalIn: 0, totalOut: 0, currentStock: 0, jumlahMaterial: 0, materialMinimum: 0, materialKurang: 0 };
+                vMap[v].currentStock += cur; vMap[v].jumlahMaterial++; vMap[v].materialMinimum += min;
+                let isLow = cur < min;
+                if(isLow) { vMap[v].materialKurang++; kurang++; }
+                
+                let r = { patNumber: m.pat_number, description: m.material_description, vendor: m.vendor, currentStock: cur, minStock: min, satuan: m.satuan, stockStatus: isLow ? 'KURANG' : 'AMAN' };
+                stockRows.push(r);
+                if(isLow) lowRows.push(r);
+            });
+            
+            stockRows.sort((a,b) => b.currentStock - a.currentStock);
+            res = { success: true, cards: { materialAktif: (mData||[]).length, vendor: Object.keys(vMap).length, totalIn: tIn, totalOut: tOut, currentStock: cStock, minimum: mTotal, kurang: kurang }, vendorRows: Object.values(vMap).sort((a,b) => a.vendor.localeCompare(b.vendor)), stockRows: stockRows.slice(0,30), lowRows: lowRows.slice(0,100), allMaterialRows: stockRows };
+            break;
+            
           case 'apiGetReadiness':
+            const rArgs = args[0] || {};
+            let { data: rMats } = await supabaseClient.from('materials').select('*').neq('status', 'Inactive');
+            if(rArgs.vendor && rArgs.vendor !== 'Semua') rMats = rMats.filter(m => m.vendor === rArgs.vendor);
+            if(rArgs.material && rArgs.material !== 'Semua') rMats = rMats.filter(m => m.pat_number === rArgs.material || m.material_id === rArgs.material);
+            
+            let av = 0, na = 0, readRows = [], readVMap = {};
+            (rMats || []).forEach(m => {
+                let cur = Number(m.current_stock || 0);
+                let min = Number(m.min_stock || 0);
+                let isAv = min > 0 ? cur >= min : cur > 0;
+                let stat = isAv ? 'AV' : 'NA';
+                if(rArgs.status && rArgs.status !== 'Semua' && stat !== rArgs.status) return;
+                
+                if(isAv) av++; else na++;
+                let v = m.vendor || 'UNKNOWN';
+                if(!readVMap[v]) readVMap[v] = { vendor: v, available: 0, na: 0 };
+                if(isAv) readVMap[v].available++; else readVMap[v].na++;
+                
+                readRows.push({ vendor: v, material: m.pat_number, description: m.material_description, keterangan: m.oil_type || 'CONSIGNMENT', readiness: stat, min: min, sto: cur, satuan: m.satuan });
+            });
+            let readPct = rMats.length ? (av / rMats.length * 100) : 0;
+            let tLabels = [], tValues = [];
+            for(let i=6; i>=0; i--) { let d = new Date(); d.setDate(d.getDate() - i); tLabels.push(`${String(d.getDate()).padStart(2,'0')} ${d.toLocaleString('default',{month:'short'})}`); tValues.push(readPct); }
+            
+            res = { success: true, totalNA: na, totalAvailable: av, readinessPct: readPct, rows: readRows, vendorRows: Object.values(readVMap).sort((a,b) => a.vendor.localeCompare(b.vendor)), trend: { labels: tLabels, values: tValues } };
+            break;
+            
           case 'apiGetPlanDashboard':
-            // Fallback memanggil reload master data agar frontend tetap update
-            res = { success: true }; 
+            const pArgs = args[0] || {};
+            let { data: pPlans } = await supabaseClient.from('plans').select('*');
+            let pQuery2 = supabaseClient.from('transactions').select('*').eq('type', 'IN');
+            if(pArgs.startDate) pQuery2 = pQuery2.gte('trx_date', pArgs.startDate);
+            if(pArgs.endDate) pQuery2 = pQuery2.lte('trx_date', pArgs.endDate);
+            const { data: pTx } = await pQuery2;
+            
+            let incMap = {};
+            (pTx || []).forEach(t => {
+                let k = `${t.fillup_no}|${t.pat_number}`.toUpperCase();
+                incMap[k] = (incMap[k] || 0) + Number(t.qty || 0);
+            });
+            
+            let pDet = [], fMap = {}, tOrd = 0, tInc = 0, pSes = 0, pKur = 0, pLeb = 0;
+            (pPlans || []).forEach(p => {
+                let oQty = Number(p.qty_order || 0);
+                let k = `${p.fillup_no}|${p.pat_number}`.toUpperCase();
+                let iQty = incMap[k] || 0;
+                let selisih = oQty - iQty;
+                let prog = oQty ? (iQty / oQty * 100) : 0;
+                let stat = 'Kurang';
+                if (iQty === oQty) { stat = 'Sesuai'; pSes++; } else if (iQty > oQty) { stat = 'Lebih'; pLeb++; } else { pKur++; }
+                
+                tOrd += oQty; tInc += iQty;
+                pDet.push({ planId: p.plan_id, fillupNo: p.fillup_no, planDate: p.plan_date, patNumber: p.pat_number, description: p.material_description, qtyOrder: oQty, incoming: iQty, selisih: selisih, progress: prog, satuan: p.satuan, vendor: p.vendor, status: stat });
+                
+                let fn = p.fillup_no || '-';
+                if(!fMap[fn]) fMap[fn] = { fillupNo: fn, qtyOrder: 0, incoming: 0, item: 0 };
+                fMap[fn].qtyOrder += oQty; fMap[fn].incoming += iQty; fMap[fn].item++;
+            });
+            
+            let fArr = [];
+            for(let k in fMap) {
+                let f = fMap[k];
+                f.selisih = f.qtyOrder - f.incoming; f.progress = f.qtyOrder ? (f.incoming / f.qtyOrder * 100) : 0;
+                f.status = f.incoming === f.qtyOrder ? 'Sesuai' : (f.incoming > f.qtyOrder ? 'Lebih' : 'Kurang');
+                fArr.push(f);
+            }
+            
+            res = { success: true, cards: { totalOrder: tOrd, totalIncoming: tInc, selisih: tOrd - tInc, progress: tOrd ? (tInc / tOrd * 100) : 0, totalFillup: fArr.length, sesuai: pSes, kurang: pKur, lebih: pLeb }, fillups: fArr, details: pDet, plans: pPlans };
             break;
             
           default:
@@ -462,15 +571,14 @@
         
         success(res);
       } catch (err) {
-        console.error("Supabase Error:", err);
+        console.error("Supabase API Error:", err);
         failure(err.message || String(err));
       }
     }
 
     // ==============================================================
-    // KODE UI ASLI (Tidak diubah, hanya callServer diganti isinya)
+    // KODE UI ASLI (Frontend Logic)
     // ==============================================================
-
     var state = { user:null, materials:[], materialsAll:[], vendors:[], vendorsAll:[], slocs:[], slocsAll:[], settings:{}, historyRows:[], dashboard:null, readiness:null, plan:null, charts:{} };
 
     function qs(sel){ return document.querySelector(sel); }
@@ -483,9 +591,11 @@
     function pct(v){ v = Number(v || 0); if(isNaN(v)) v = 0; return v.toFixed(1).replace('.', ',') + '%'; }
     function hasClass(el, cls){ return el && (' '+el.className+' ').indexOf(' '+cls+' ') > -1; }
 
-    // ROUTER PENGGANTI google.script.run
     function callServer(fn, args, success, failure){
-      supabaseRouter(fn, args, success, failure);
+      supabaseRouter(fn, args, success, failure).catch(function(e) {
+         console.error("Uncaught in router:", e);
+         if(failure) failure(String(e));
+      });
     }
 
     document.addEventListener('DOMContentLoaded', function(){ initApp(); });
@@ -565,11 +675,6 @@
     function hideLoader(){ qs('#loader').style.display = 'none'; }
     function toast(msg, type){ var el = qs('#toast'); el.className = 'toast ' + (type || ''); el.innerHTML = esc(msg); el.style.display = 'block'; setTimeout(function(){ el.style.display='none'; }, 4200); }
     function loginBox(msg, type){ var el = qs('#loginError'); if(!msg){ el.style.display='none'; el.className='errorbox'; el.innerHTML=''; return; } el.className = 'errorbox ' + (type || 'error'); el.style.display='block'; el.innerHTML = esc(msg); }
-
-    function testServer(){
-      loginBox('', ''); showLoader('Test server...');
-      callServer('apiPing', [], function(res){ hideLoader(); loginBox((res.message || 'Server aktif') + ' - ' + (res.serverTime || ''), 'success'); }, function(err){ hideLoader(); loginBox(err, 'error'); });
-    }
 
     function login(){
       loginBox('', ''); showLoader('Memeriksa login...');
@@ -663,9 +768,7 @@
       fillSelect('#dashShift', ['Shift 1','Shift 2','Non Shift'], null, null, 'Semua');
       fillSelect('#readyShift', ['Shift 1','Shift 2','Non Shift'], null, null, 'Semua Shift');
       
-      // Karena JSON database menggunakan key UPPERCASE, kita pastikan properti yang diakses sesuai
       const vendorOpts = state.vendors.map(v => ({VENDOR_NAME: v.vendor_name || v.VENDOR_NAME}));
-      
       fillSelect('#inVendor', vendorOpts, 'VENDOR_NAME', 'VENDOR_NAME', 'Pilih Vendor');
       fillSelect('#histVendor', vendorOpts, 'VENDOR_NAME', 'VENDOR_NAME', 'Semua');
       fillSelect('#masterVendor', vendorOpts, 'VENDOR_NAME', 'VENDOR_NAME', 'Semua');
@@ -784,7 +887,7 @@
     function exportPdf(type){
       var p = type === 'OUT' ? gatherOutPayload() : gatherInPayload(); if(!p.lines.length){ toast('Detail material masih kosong.', 'error'); return; }
       showLoader('Membuat PDF...');
-      callServer('apiCreatePdf', [type, p], function(res){ hideLoader(); toast('PDF berhasil dibuat.', 'success'); if(res.url) window.open(res.url, '_blank'); }, function(err){ hideLoader(); toast(err, 'error'); });
+      callServer('apiCreatePdf', [type, p], function(res){ hideLoader(); toast('PDF berhasil dibuat.', 'success'); }, function(err){ hideLoader(); toast(err, 'error'); });
     }
 
     function historyFilters(type){ return { startDate:val('#histStart'), endDate:val('#histEnd'), shift:val('#histShift'), vendor:val('#histVendor'), material:val('#histMaterial'), noLambung:val('#histNo'), keyword:val('#histKeyword'), type:type || 'ALL' }; }
@@ -800,10 +903,8 @@
 
     function exportHistoryCsv(){ var rows = state.historyRows || []; if(!rows.length){ toast('Data riwayat kosong.', 'error'); return; } var heads = ['TRX_DATE','TYPE','SHIFT','VENDOR','PAT_NUMBER','MATERIAL_DESCRIPTION','QTY','SATUAN','SUMBER','TUJUAN','DO_NUMBER','FILLUP_NO','NO_LAMBUNG','STOCK_BEFORE','STOCK_AFTER']; downloadCsv('riwayat_ogdc.csv', heads, rows); }
 
-    // Sisa fungsi dashboard dll berjalan seperti biasa, karena dimodifikasi di memory
     function refreshDashboard(){ showLoader('Refresh dashboard...'); callServer('apiGetDashboard', [{ startDate:val('#dashStart'), endDate:val('#dashEnd'), shift:val('#dashShift'), vendor:val('#dashVendor'), material:val('#dashMaterial') }], function(res){ hideLoader(); state.dashboard=res; renderDashboard(res); }, function(err){ hideLoader(); toast(err, 'error'); }); }
     function renderDashboard(data){
-      // Simulasi Dummy Data agar tampilan dashboard tidak kosong untuk demo
       data = data || {cards:{},vendorRows:[],stockRows:[],lowRows:[],allMaterialRows:[]}; var c=data.cards||{ materialAktif:1, vendor:1, totalIn:100, totalOut:50, currentStock:50, minimum:10, kurang:0};
       qs('#dashKpis').innerHTML = kpi('Material Aktif', c.materialAktif, 'blue') + kpi('Vendor', c.vendor, 'green') + kpi('Total IN', c.totalIn, 'green') + kpi('Total OUT', c.totalOut, 'orange') + kpi('Current Stock', c.currentStock, 'blue') + kpi('Minimum', c.minimum, 'dark') + kpi('Kurang', c.kurang, 'red');
       renderVendorTable(data.vendorRows || []); renderLowStockTable(data.lowRows || []); renderAllMaterialDash(data.allMaterialRows || []); renderDashboardCharts(data);
