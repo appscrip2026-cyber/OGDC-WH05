@@ -403,7 +403,7 @@
             const { data: refMat } = await supabaseClient.from('materials').select('*');
             res = { success: true, message: `Data berhasil disimpan: ${saved} baris.`, saved: saved, photoUrl: photoUrl, data: { materials: refMat, materialsAll: refMat } };
             break;
-            
+
           case 'apiCreatePdf':
             const docType = args[0];
             const pLoad = args[1];
@@ -521,7 +521,7 @@
             
             res = { success: true, totalNA: na, totalAvailable: av, readinessPct: readPct, rows: readRows, vendorRows: Object.values(readVMap).sort((a,b) => a.vendor.localeCompare(b.vendor)), trend: { labels: tLabels, values: tValues } };
             break;
-            
+
           case 'apiGetPlanDashboard':
             const pArgs = args[0] || {};
             let { data: pPlans } = await supabaseClient.from('plans').select('*');
@@ -717,17 +717,22 @@
         toast('Data awal belum terbaca: ' + err, 'error');
       });
     }
+
     function applyBaseData(res){
-      state.materials = res.materials || [];
-      state.materialsAll = res.materialsAll || state.materials;
-      state.vendors = res.vendors || [];
-      state.vendorsAll = res.vendorsAll || state.vendors;
-      state.slocs = res.slocs || [];
-      state.slocsAll = res.slocsAll || state.slocs;
-      state.settings = res.settings || {};
-      state.dashboard = res.dashboard || null;
-      state.readiness = res.readiness || null;
-      state.plan = res.plan || null;
+      // PERBAIKAN: Gunakan data lama (state) jika server tidak mengirimkan data pembaruan
+      // Hal ini mencegah dropdown Vendor dan SLOC menjadi kosong setelah submit transaksi.
+      state.materials = res.materials || state.materials || [];
+      state.materialsAll = res.materialsAll || state.materialsAll || state.materials;
+      state.vendors = res.vendors || state.vendors || [];
+      state.vendorsAll = res.vendorsAll || state.vendorsAll || state.vendors;
+      state.slocs = res.slocs || state.slocs || [];
+      state.slocsAll = res.slocsAll || state.slocsAll || state.slocs;
+      state.settings = res.settings || state.settings || {};
+      
+      if(res.dashboard !== undefined) state.dashboard = res.dashboard;
+      if(res.readiness !== undefined) state.readiness = res.readiness;
+      if(res.plan !== undefined) state.plan = res.plan;
+      
       renderOptions();
     }
 
